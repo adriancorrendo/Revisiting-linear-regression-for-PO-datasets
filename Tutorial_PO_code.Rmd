@@ -1,0 +1,719 @@
+---
+title: "R-Code Tutorial: Revisiting linear regression to test agreement in continuous predicted-observed datasets"
+author: Adrian A. Correndo, Trevor Hefley, Dean P. Holzworth, and Ignacio A. Ciampitti
+output:
+  pdf_document: 
+    toc: yes
+  html_document: default
+  word_document: default
+---
+
+$^*$Corresponding: e-mail: correndo@ksu.edu - ciampitti@ksu.edu. <br/>
+
+\newpage
+
+## Libraries needed. <br/>
+```{r warning=FALSE, message=FALSE}
+#install.packages("easypackages") # To install packages
+library(easypackages)
+packages("tidyverse", "data.table", "fs", "readxl") # Data wrangling
+packages("ggplot2", "ggpubr", "ggformula", "EnvStats",
+         "ggExtra", "ggpmisc","ggthemes","magrittr",
+         "hrbrthemes", "ggimage", "cowplot") # Figures
+packages("smatr") # Regression Models
+packages("kableExtra") # Tables
+
+```
+
+\newpage
+
+## Error Metrics Definitions. <br/>
+
+The following lines of code define functions for the calculation of error metrics described in Table 5, Correndo et al. (2021). <br/>
+
+```{r warning=FALSE, message=FALSE}
+
+# Variance (uncorrected, for MSE and its decomposition)
+SSx <- function(x){sum((x - mean(x))^2)/length(x)}
+
+# Standard Deviation (uncorrected, for MSE and its decomposition)
+sdev <- function(x){sqrt(SSx(x))}
+
+# Mean Bias Error (Predicted compared to Observed)
+MBErr <- function(Obs,Pre){(mean(Pre)-mean(Obs))}
+
+# Mean Square Error
+MSE <- function(Obs,Pre){sum((Obs-Pre)^2)/length(Obs)}
+
+# Root Mean Square Prediction Error
+RMSE <- function(Obs,Pre){sqrt(sum((Obs-Pre)^2)/length(Obs))}
+
+# Accuracy component of CCC
+Xa <- function(Obs,Pre){(2 / (sdev(Pre)/sdev(Obs) +
+                                sdev(Obs)/sdev(Pre) +
+                                (MBErr(Obs,Pre)^2/(sdev(Pre)*sdev(Obs)))) )}
+
+# Concordance Correlation (Lin,1989), equivalent to r*Xa
+CCC <- function(Obs, Pre) {cor(Obs,Pre) * Xa(Obs,Pre)}
+
+```
+
+\newpage
+
+## Decomposition metrics using SMA. <br/>
+
+The following lines of code cover the functions necessary to perform calculations presented in Section 2.5 (Error decomposition using linear regression), Correndo et al. (2021). <br/>
+
+```{r, warning=F, message=F}
+# Mean Lack of Accuracy (Systematic difference)
+MLA <- function(Obs, Pre){sum ((
+  Pre - ( (mean(Obs) - (sdev(Obs)/sdev(Pre)*mean(Pre))) +
+            sdev(Obs)/sdev(Pre) * Pre))^2) / length(Obs) }
+
+# Mean Lack of Precision (Unsystematic difference)
+MLP <- function(Obs, Pre){
+  sum (abs(Obs - ((mean(Obs) - (sdev(Obs)/sdev(Pre)*mean(Pre))) +
+                    sdev(Obs)/sdev(Pre) * Pre)) *
+         abs(Pre - ((mean(Pre) - (sdev(Pre)/sdev(Obs)*mean(Obs))) +
+                      sdev(Pre)/sdev(Obs) * Obs) ) ) / length(Obs) }
+
+# Kobayashi and Salam (2000) MSE segregation, also in Gupta et al. (2009)
+# LCS = MLP; SB + SDSD = MLA
+# However, authors consider LCS + SDSD as unsystematic (Mean Square Variation)
+# We argue that SDSD is part of the "systematic" component
+# Table 3, MLA = SB + SDSD, Correndo et al., (2021)
+
+# Lack of correlation
+LCS <- function(Obs, Pre){2 * sdev(Pre) * sdev(Obs) * (1 - cor(Obs,Pre))}
+# Square difference between standard deviations
+SDSD <- function(Obs, Pre){(sdev(Pre) - sdev(Obs))^2}
+# Square bias
+SB <- function(Obs, Pre){(mean(Obs) - mean(Pre))^2}
+
+# Equivalence with Kobayashi and Salam (2000)
+# MLA as the sum of SDSD + SB
+MLA2 <- function(Obs, Pre){SDSD(Obs,Pre) + SB(Obs,Pre)}
+# MLP as LCS
+MLP2 <- function(Obs, Pre){ LCS(Obs,Pre) }
+
+# Theil's partial inequalities, Smith & Rose (1995)
+# Proportion of TSS related to mean bias (additive bias, part of PLA)
+Ub <- function(Obs,Pre){100*
+    (length(Obs)*(mean(Obs)-mean(Pre))^2) / sum((Obs-Pre)^2) }
+
+# Lack of Consistency. Proportion of TSS related to proportional bias (PLA)
+Uc <- function(Obs,Pre){100*
+    (length(Obs)*(sdev(Obs)-sdev(Pre))^2) / sum((Obs-Pre)^2) }
+
+# Proportion of TSS related to random error (= PLP)
+Ue <- function(Obs,Pre){100*
+    ( 2*length(Obs)* (1-cor(Obs,Pre))*sdev(Pre)*sdev(Obs) )  / sum((Obs-Pre)^2)}
+
+# Equivalence with Smith & Rose (1995)
+PLA <- function(Obs,Pre) {Ub(Obs,Pre) + Uc(Obs,Pre)} 
+PLP <- function(Obs,Pre) {Ue(Obs,Pre)}
+
+# Percentage additive bias (contribution to MLA)
+PAB <- function(Obs,Pre) {100 * (SB(Obs,Pre)) / MSE(Obs,Pre)  }
+# Percentage proportional bias (contribution to MLA)
+PPB <- function(Obs,Pre) {100 * (SDSD(Obs,Pre)) / MSE(Obs,Pre)  }
+
+
+```
+
+\newpage
+
+## Illustrative dataset. Comparing Regressions. <br/>
+
+Simulated dataset provided in Figure 2, Correndo et al. (2021). <br/>
+
+```{r warning=F, message=F}
+# Define example dataset
+data = data.frame(x = c(2,3,4,5,6,7,8,9,10,11),
+                  y = c(4,5.5,2.5,4.5,8,5,6,10,7.5,8.5))
+
+#OLSv yx
+# Extracting coeff. using LM
+YX <- lm(y~x, data=data)
+YX.slope <- YX %>% coef %>% .[[2]]
+YX.intercept <- YX %>% coef %>% .[[1]]
+# Manual alternative 
+#OLSv_slope = Cov(data$x,data$y)/SSx(data$x) # OLSv slope
+#OLSv_int = mean(data$y) - (OLSv_slope*mean(data$x)) # OLSv Intercept
+
+#OLSh xy 
+# Extracting coeff. using LM
+XY <- lm(x~y, data=data)
+XY.slope <- (1/XY$coef[2])
+XY.intercept <- -(XY$coef[1]/XY$coef[2])
+# Manual alternative
+#OLSh_slope = SSx(data$y)/Cov(data$x,data$y) # OLSh slope
+#OLSh_int = mean(data$y) - (OLSh_slope*mean(data$x)) # OLSh Intercept
+
+# Major axis
+# Extracting coeff. using smatr package (Warton et al., 2012)
+MA = sma(y~x, method = "MA", data = data)
+MA.slope <- MA %>% coef %>% .[[2]]
+MA.intercept <- MA %>% coef %>% .[[1]]
+
+# Standardized Major axis
+# Extracting coeff. using smatr
+SMA = sma(y~x, method = "SMA", data = data)
+SMA.slope <- SMA %>% coef %>% .[[2]]
+SMA.intercept <- SMA %>% coef %>% .[[1]]
+
+data = data %>%
+  mutate(#add the slopes/intercepts to the data frame:
+         slope_YX=YX.slope,
+         slope_XY=XY.slope,
+         slope_MA=MA.slope,
+         slope_SMA=SMA.slope,
+         intercept_YX=YX.intercept,
+         intercept_XY=XY.intercept,
+         intercept_MA=MA.intercept,
+         intercept_SMA=SMA.intercept,
+         )%>% 
+  #transpose to a long form
+  gather(key="key",value="value",-c(x,y)) %>% 
+  # have "yhat_YX", want two colums of "yhat" "YX"
+  separate(key,c("type","line"),"_") %>% 
+  #then transpose to be fatter, so we have cols for xhat, yhat etc
+  spread(key="type",value="value") %>%
+  #relable the lines with more descriptive names, and reorder for plotting:
+  mutate(line=case_when(
+           line=="YX" ~ "A. OLSv y~x",
+           line=="XY" ~ "B. OLSh x~y",
+           line=="MA" ~ "C. MA",
+           line=="SMA" ~ "D. SMA"),
+         line=factor(line,levels=c("A. OLSv y~x","B. OLSh x~y","C. MA","D. SMA"))) %>%
+  arrange(., line)
+
+# Plot
+data %>% filter(line %in% c("A. OLSv y~x","B. OLSh x~y","C. MA","D. SMA")) %>%
+  ggplot() +
+  geom_point(aes(x=x,y=y), color="black", size=3,show.legend=F)+
+  geom_abline(aes(slope=slope,intercept=intercept,colour=line),size=1.25,show.legend=F)+
+  geom_abline(linetype = "dashed", size = 1.25)+
+  scale_colour_manual("", values = c("#126b56", "#9e761a","dark red", "purple"))+
+  scale_x_continuous(limits = c(0,12.9), breaks = seq(0,12,by=2))+
+  scale_y_continuous(limits = c(0,12.9), breaks = seq(0,12,by=2))+
+  labs(x = "Predicted or Observed", y = "Predicted or Observed")+
+  facet_wrap(~line, nrow = 1)+
+  theme_few()+
+  theme(axis.text.y = element_text(color="black", size = rel(1.25), family = "serif"),
+        axis.text.x = element_text(color="black", size = rel(1.25), family = "serif"),
+        axis.title = element_text(color = "black", size = rel(1.5),
+                                  family = "serif",face = "bold",
+                                 margin(t = 0, r = -2, b = 0, l = 0, unit = "inches")),
+        strip.text = element_text(size = rel(1), family = "serif"),
+        strip.background = element_blank(),
+    plot.margin=unit(c(1,1,1,1), "pt"),
+        aspect.ratio = 1)+
+  labs(x = "Observed or Predicted", y = "Observed or Predicted")
+
+
+```
+\newpage
+
+### Error Decomposition with OLS, MA and SMA. <br/>
+
+The following lines of code correspond to the error decompositions proposed in Section 2.5, and in Supplementary material of Correndo et al. (2021). The decompositions include the proposed by Willmott et al.(1981) using OLS, by Duveiller et al.(2006) using MA, and adapted from Ji and Gallo (2006) using SMA linear regressions. <br/>
+
+```{r warning=F, message=F}
+
+# Example 1, Figure 2, Correndo et al. (2021) -Agr. Syst.-
+df = data.frame(O_i = c(2,3,4,5,6,7,8,9,10,11),
+                P_i = c(4,5.5,2.5,4.5,8,5,6,10,7.5,8.5),
+                sim = rep(1)) %>% nest(data=c("O_i", "P_i"))
+
+# Optional, Example 2, Table 9.1, Wallach et al. (2019)
+# Remove the "#" to use this dataset
+#df = data.frame(O_i = c(78,110,92,75,110,108,113,155,150),
+#               P_i = c(126,126,126,105,105,105,147,147,147),
+#                sim = rep(1)) %>% nest(data=c("O_i", "P_i"))
+
+
+# Estimate linear models and Sum of Unsyst and Syst differences
+example = df %>%  
+  mutate(
+    #MODELS
+    model_ols = data %>% map(~lm(P_i~O_i, data=df %>% unnest())),
+    model_ma = data %>% map(~sma(P_i~O_i,data=., method = "MA")),
+    model_sma = data %>% map(~sma(P_i~O_i,data=.)),
+    #Fitted P and O
+    #Fitted P values as function of O using OLS,
+    # To calculate MSEu and MSEs proposed by Willmott (1981)
+    P_ols = map2(data, model_ols,
+                    ~ .y %>% coef %>% .[[1]] + .y %>% coef %>% .[[2]] * .x$O_i),
+    #Fitted P values as function of O using MA
+    # To calculate 2h^2 proposed by Duveiller et al (2016)
+    P_ma = map2(data, model_ma,
+                    ~ .y %>% coef %>% .[[1]] + .y %>% coef %>% .[[2]] * .x$O_i),
+    #Fitted P values as function of O using SMA
+    # To calculate Unsyst and Syst proposed by Ji & Gallo (2006)
+    # Equivalent to Kobayashi et al 2000 and Smith & Rose (1995)
+    P_sma = map2(data, model_sma,
+                  ~ .y %>% coef %>% .[[1]] + .y %>% coef %>% .[[2]] * .x$O_i),
+    #Fitted O values as function of P using SMA, Ji & Gallo (2006)
+    O_sma = map2(data, model_sma,
+    # SMA slope_OP = 1/slope_PO
+    ~ ((1/(.y %>% coef %>% .[[2]]))*.x$P_i) +
+      (mean(.x$O_i)-((1/(.y %>% coef %>% .[[2]]))*
+                       mean(.x$P_i) ))),
+    # MA residuals (hi) (Table 1, Eq. (6))
+    h_ma = map2(data, model_ma,
+                ~sqrt((.x$P_i - (.y %>% coef %>% .[[1]] +
+                        .y %>% coef %>%
+                          .[[2]] * .x$O_i))^2 /
+                          ((.y %>% coef %>% .[[2]])^2 + 1) ),
+         ))
+
+# Estimating residuals from OLS, MA and SMA lines
+example = example %>%
+  # Remove models and keep only data of interest
+  dplyr::select(-model_sma, -model_ma, -model_ols) %>%
+  unnest(cols=c("data", "P_sma", "O_sma", "P_ols", "P_ma","h_ma")) %>%
+  mutate(n = length(O_i),
+         Sq_diff = (O_i-P_i)^2, # Square difference bw P_i & O_i
+         O_45 = P_i, # Observed 45 line = Predicted
+         P_45 = O_i, # Predicted 45 line = Observed
+         Oi_45 = abs(O_i - O_45), # Diff. actual O (i) vs. 1:1-line
+         Pi_45 = abs(P_i - P_45), # Diff. actual P (i) vs. 1:1-line
+         UD_ols = (P_ols-P_i)^2, # Unsyst. Diff. OLS - Willmott (1981)
+         SD_ols = (P_ols-O_i)^2, # Syst.Diff. OLS - Willmott (1981)
+         Psma_i = abs(P_sma - P_i), # Diff. sma-line P (sma) vs. actual P (i)
+         Osma_i = abs(O_sma - O_i), # Diff. sma-line O (sma) vs. actual O (i)
+         P45_sma = abs(P_45 - P_sma), # Diff. Pi=O (1:1-line) vs. sma P (i)
+         O45_sma = abs(O_45 - O_sma), # Diff. Oi=P (1:1-line) vs. sma O (i)
+         PD = Oi_45 * Pi_45, # Product of Diff., O (i-45) by P (i-45)
+         UD_ma = 2*h_ma^2, # Unsyst.Diff. MA - Adapted Duveiller et al (2016)
+         UD_ma2 = ((2*h_ma)^2)/2, # Adapted Duveiller et al (2016)
+         SD_ma = (P_ma-O_i)^2, # Systematic Diff. MA
+         UD_sma = Osma_i * Psma_i, # Unsyst. Diff., SMA - Ji & Gallo (2006)
+         SD_sma = P45_sma^2) %>% # Syst. Diff., SMA
+  #group_by(sim) %>%
+  mutate(#METRICS DERIVED FROM REGRESSION LINES
+         TSS = sum(Sq_diff), # Total sum of squares REFERENCE
+         SUD_ols = sum(UD_ols),# Sum of unsyst. diff. from OLS
+         SSD_ols = sum(SD_ols), # Sum of syst. diff. from OLS
+         TSS_ols = SUD_ols + SSD_ols, # *TSS as SUD_ols + SSD_ols
+         SUD_ma = sum(UD_ma),# Sum of unsyst. diff. from MA
+         SSD_ma = sum(SD_ma), # Sum of syst. diff. from MA
+         TSS_ma = SUD_ma + SSD_ma, # *TSS as SUD_ma + SSD_ma
+         SUD_sma = sum(UD_sma), # Sum of unsyst. diff. from SMA 
+         SSD_sma = sum(SD_sma), # Sum of syst. diff. from SMA
+         TSS_sma = SUD_sma + SSD_sma, # TSS as SUD_sma + SSD_sma
+         `SUD_%` = 100*SUD_sma/TSS,# Contribution of SUD to TSS = PLP
+         `SSD_%` = 100*SSD_sma/TSS,# Contribution of SSD to TSS = PLA
+         MSE_tss = TSS/length(O_i), # MSE as TSS/n
+         MSEu = SUD_ols/length(O_i),
+         MSEs = SSD_ols/length(O_i),
+         MSE_willmott = MSEu + MSEs,
+         MLP_sma = SUD_sma/n, # Mean Lack of Precision from SMA (SUD_sma/n)
+         MLA_sma = SSD_sma/n, # Mean Lack of Accuracy from SMA (SUD_sma/n)
+         MSE_sma = MLP_sma + MLA_sma, # MSE from SMA
+         # METRICS FROM FUNCTIONS
+         cor = cor(P_i,O_i), # Pearson correlation
+         CCC = CCC(O_i, P_i), # Concordance correlation
+         #Option from a package that also estimates ConfIntervals
+         #CCC = CCC(O_i, P_i, ci = "z-transform", conf.level = 0.95)[[1]]$est,
+         bias2 = MBErr(O_i,P_i)^2,
+         MSE = MSE(P_i,O_i), # MSE from traditional formula
+         MLP = MLP(O_i,P_i), # MLP proposed from formula
+         MLA = MLA(O_i,P_i), # MLA proposed from formula
+         RMLP = sqrt(MLP), # Root MLP
+         RMLA = sqrt(MLA), # Root MLA
+         PLP = 100*(MLP/MSE), # Percentage Lack of Precision
+         PLA = 100*(MLA/MSE), # Percentage Lack of Accuracy
+         PAB = PAB(O_i,P_i), # Percentage additive bias (to MSE)
+         PPB = PPB(O_i,P_i) # Percentage proportional bias (to MSE)
+         )
+
+# Individual differences Willmott (1981)
+ex.points.OLS = example %>%
+  dplyr::select(O_i, P_i, P_ols, UD_ols, SD_ols)
+kable(ex.points.OLS) %>%  
+  kable_styling(latex_options =c("striped"))
+
+# Individual differences Duveiller et al (2016)
+ex.points.MA = example %>%
+  dplyr::select(O_i, P_i, P_ma, h_ma, UD_ma, SD_ma)
+kable(ex.points.MA) %>%  
+  kable_styling(latex_options =c("striped"))
+
+# Individual differences Willmott (1981)
+ex.points.SMA = example %>%
+  dplyr::select(O_i, P_i, Psma_i, Osma_i, UD_sma, SD_sma)
+kable(ex.points.SMA) %>%  
+  kable_styling(latex_options =c("striped"))
+
+# Metrics summary using data points and line
+# 1. MSEs + MSEu (Willmott, 1981) do not match MSE
+ex.summary.line.OLS = example %>%
+  dplyr::group_by(sim) %>% slice_head() %>% ungroup() %>% 
+  dplyr::select(TSS,SUD_ols,SSD_ols,TSS_ols,
+                MSE_tss,MSEu,MSEs,MSE_willmott)
+kable(ex.summary.line.OLS) %>%  
+  kable_styling(latex_options =c("striped","scale_down"))
+
+# 2. SUD_ma (Duveiller, 2016) is NOT additive to the TSS (nor to MSE)
+ex.summary.line.MA = example %>%
+  dplyr::group_by(sim) %>% slice_head() %>% ungroup() %>% 
+  dplyr::select(TSS,SUD_ma,SSD_ma,TSS_ma)
+kable(ex.summary.line.MA) %>%  
+  kable_styling(latex_options =c("striped"))
+
+# 3. MLP_sma + MLA_sma = MSE
+ex.summary.line.SMA = example %>%
+  dplyr::group_by(sim) %>% slice_head() %>% ungroup() %>% 
+  dplyr::select(TSS,SUD_sma,SSD_sma,TSS_sma,
+                MSE_tss,MLP_sma,MLA_sma,MSE_sma)
+  
+# Print summary SMA line
+kable(ex.summary.line.SMA) %>% 
+  kable_styling(latex_options =c("striped","scale_down"))
+
+# Print example summary
+kable(example %>% dplyr::select(1:8,10:11)) %>%  
+  kable_styling(latex_options =c("striped","scale_down"))
+kable(example %>% dplyr::select(12:26)) %>%  
+  kable_styling(latex_options =c("striped","scale_down"))
+kable(example %>% dplyr::select(27:36) %>% slice_head()) %>%  
+  kable_styling(latex_options =c("striped","scale_down"))
+kable(example %>% dplyr::select(37:45) %>% slice_head()) %>%  
+  kable_styling(latex_options =c("striped","scale_down"))
+kable(example %>% dplyr::select(46:57) %>% slice_head()) %>%  
+  kable_styling(latex_options =c("striped","scale_down"))
+
+# Metrics summary using defined functions
+ex.summary.functions = example %>% dplyr::select(1,46:57) %>%
+  group_by(sim) %>% slice_head() %>% ungroup()
+
+# Print summary of functions
+kable(ex.summary.functions) %>% 
+  kable_styling(latex_options =c("striped","scale_down"))
+  
+
+
+```
+
+\newpage
+
+## APSIM Datasets. <br/>
+
+The following four datasets are collections of point forecasts from multiple locations belonging to simulation modules at different stages of their calibration process of APSIM model (Holzworth et al., 2018), described in Table 4, by Correndo et al. (2021). <br/>
+
+**Disclaimer**: *The data published here originated from the following GitHub repository: https://github.com/APSIMInitiative/ApsimX. This data has been provided for use for the development of APSIM.  Any Improvements to APSIM are owned by the APSIM Initiative and are covered by the terms and conditions which can be accessed here:  www.apsim.info.* <br/>
+
+**Note**: *The next coding lines allow users to read multiple worksheets in a single excel file at once. Users could replace the provided with their own datasets. If the number of new datasets differs from 4, user must change the assigned "id" below* <br/>
+
+```{r warning = F, message=F, echo=TRUE}
+
+# Read the worksheets in a xlsx file
+# define the file path
+path = "APSIM_datasets.xlsx"
+sheet_names = path %>% excel_sheets()
+
+# Read the multiple worksheets
+mad = path %>% excel_sheets() %>% set_names(., sheet_names) %>% map(read_excel, path = path)
+
+# Extracting dataframes
+# create a tibble of necessary rows (or use the sheet names vector)
+# mapping must be done with map using 1:n vector because the data is still under "list" format
+APSIM =  as.tibble(sheet_names) %>%
+  rename(., dataset = value) %>%
+  mutate(examples = map(seq(1,4,by=1),~as.data.frame(mad[[.]])),
+         # Assign "id", UPDATE if removing/adding datasets (as worksheets) 
+         id = seq(1,4,by=1))
+
+# Unnest and select variables of interest
+APSIM = APSIM %>% unnest() %>% dplyr::select(id, dataset, predicted, observed)
+
+# Filtering datasets 1,2,3,4
+APSIM_datasets = APSIM %>%
+  # ID corresponding to the worksheet order
+  filter(id == 1 | id == 2  | id == 3 | id == 4) %>%
+  dplyr::select(id, observed, predicted) %>%
+  # Renaming observed (O_i) and predicted columns (P_i)
+  mutate(O_i = observed, P_i = predicted) %>%
+  dplyr::select(id, O_i, P_i) %>% nest(data=c('O_i', 'P_i')) %>%
+  # Assing unique letters to the datasets
+  mutate(Dataset = rep(c("A","B","C","D"))) %>%
+  dplyr::select(-id) %>% arrange(., Dataset)
+
+```
+
+\newpage
+
+## APSIM examples. <br/>
+## Error Metrics. <br/>
+```{r warning=F, message=F}
+
+APSIM_metrics = APSIM_datasets %>% 
+  unnest(cols=c("data")) %>% # Unnest observed, predicted values
+  group_by(Dataset) %>% # Grouping by dataset
+## ESTIMATING METRICS
+  mutate(mean.O = mean (O_i),
+         mean.P = mean (P_i),
+         cor = cor(P_i,O_i), # 1. Correlation Coeff.(Pearson)
+         R2 = cor^2, # 2. Coeff. of determination R2
+         MBE = MBErr(O_i,P_i), # 3. Mean Bias Error P to O
+         MSE = MSE(O_i,P_i), # 4.a. MSE
+         RMSE = RMSE(O_i, P_i), # 5.b. RMSE
+         Xa = Xa(O_i,P_i), # 6.a. Accuracy component of CCC/Lambda
+         CCC = CCC(O_i,P_i), # 6.b. Concordance Correlation Coeff. (Lin, 1989)
+      # Proposed MSE segregation
+         MLP = MLP(O_i, P_i),# Mean Lack of Precision
+         MLA = MLA(O_i, P_i),# Mean Lack of Accuracy
+         RMLP = sqrt(MLP), # Root Mean Lack of Precision
+         RMLA = sqrt(MLA), # Root Mean Lack of Accuracy
+         PLP = 100*(MLP/MSE),# Percentage Lack of Precision
+         PLA = 100*(MLA/MSE),# Percentage Lack of Accuracy
+         PAB = PAB(O_i,P_i),# Percentage Additive Bias
+         PPB = PPB(O_i,P_i),# Percentage Proportional Bias
+      # Kobayashi and Salam (2000) MSE segregation
+         LCS = LCS(O_i,P_i), # Lack of Correlation weighed by SD
+         SDSD = SDSD(O_i,P_i), # Square SD diff
+         SB = SB(O_i,P_i), # Square bias
+         MSE_kob = LCS + SDSD + SB, # MSE as sum of Kobashi's terms
+      # Theils TSS segregation (Smith & Rose, 1995)
+         Ub = Ub(O_i,P_i), # Theils's bias contribution (%)
+         Uc = Uc(O_i,P_i), # Theil's consistency contribution (%)
+         Ue = Ue(O_i,P_i), # Theil's unexplained variance contribution (%)
+      # Equivalence with Theils
+         PLP2 = PLP(O_i, P_i), # PLP as Theil's Ue
+         PLA2 = PLA(O_i, P_i), # PLA as sum of Theil's Ub + Uc
+      # Regression estimators
+         SMA_slope = sd(P_i)/sd(O_i), # Slope SMA (P vs O)
+         SMA_int = mean.P - (SMA_slope*mean.O), # SMA Intercept (P vs O)
+         MA_slope = var(P_i) - var(O_i) +
+           sqrt((var(P_i) - var(O_i))^2 +
+                  4*(cov(O_i,P_i)^2))/(2*cov(O_i,P_i)), # Slope MA
+         MA_int = mean.P - (MA_slope*mean.O), # SMA Intercept
+         OLSv_slope = cov(O_i,P_i)/var(O_i), # OLSv slope
+         OLSv_int = mean.P - (OLSv_slope*mean.O), # OLSv Intercept
+         OLSh_slope = var(P_i)/cov(O_i,P_i), # OLSh slope
+         OLSh_int = mean.P - (OLSh_slope*mean.O) # OLSh Intercept
+         ) %>% 
+  mutate_if(.,is.numeric, round, digits = 2) %>% 
+  nest(data=c(P_i,O_i)) %>% 
+  filter(row_number()==1) %>% 
+  mutate_if(.,is.numeric, round, digits = 2)
+
+# Transpose and print table
+Metrics = as_tibble(t(APSIM_metrics %>% dplyr::select(-data)), rownames = "Atribute") %>%
+  setNames(., rep(c("Example", "Wheat","Barley",
+                    "Sorghum", "Chickpea")) )
+
+# Print Error metrics
+kable(Metrics) %>% 
+  kable_styling(latex_options =c("striped","hold_position"))
+
+```
+
+\newpage
+
+##  A. Wheat Grain N <br>
+
+```{r warning=FALSE, message=FALSE}
+# Data
+APSIM_A = APSIM_datasets %>% filter(Dataset == "A") %>% unnest(cols = c("data"))
+
+# SMA regression (smatr, see Warton et al. 2012)
+APSIM_A_sma = APSIM_datasets %>% filter(Dataset == "A") %>%
+  unnest() %>% sma(P_i~O_i,data=.)
+
+FIG5_A = APSIM_A %>%
+  ggplot(aes(x = O_i, y=P_i))+
+  geom_point(shape = 21, color = "black", fill="#c9ac40", alpha=0.7,
+             size= 2,show.legend=F)+
+  geom_abline(linetype = "dotted", size=2)+ # 1:1 line
+  geom_abline(slope =  APSIM_A_sma %>% coef %>% .[[2]] ,
+              intercept = APSIM_A_sma %>% coef %>% .[[1]],
+              linetype="solid", col="#5d468f", size=2)+ # SMA regression line
+  stat_ellipse(type="norm", level=0.95)+ # Data ellipse
+  scale_x_continuous(limits = c(-2,20), breaks = seq(0,20, by=2))+
+  scale_y_continuous(limits = c(-2,20), breaks = seq(0,20, by=2))+
+  labs(title = "Wheat Grain N (g m2)", x = "Observed", y = "Predicted")+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        title = element_text(family = "serif", color="black",
+                             size = rel(1)),
+        axis.text.y = element_text(family = "serif", color="black",
+                                   size = rel(1.5)),
+        axis.text.x = element_text(family = "serif", color="black",
+                                   size = rel(1.5)),
+        strip.text = element_blank(),
+        strip.background = element_blank(),
+        aspect.ratio = 1)
+
+plot.5A = ggMarginal(FIG5_A,type = "densigram",
+    xparams = list(col="black",fill="grey",bins = 20, alpha=0.4, size = 0.5),
+    yparams = list(col="black",fill="grey", bins = 20,alpha=0.4, size=0.5))
+
+
+plot.5A
+
+```
+\newpage
+
+##  B. Barley Grain No. <br>
+
+```{r warning=FALSE, message=FALSE}
+
+# Data
+APSIM_B = APSIM_datasets %>% filter(Dataset == "B") %>%  unnest(cols = c("data"))
+
+# SMA regression (smatr, see Warton et al. 2012)
+APSIM_B_sma = APSIM_datasets %>% filter(Dataset == "B") %>%
+  unnest() %>% sma(P_i~O_i,data=.)
+
+FIG5_B = APSIM_B %>%
+  ggplot(aes(x = O_i, y=P_i))+
+  geom_point(shape = 21, color = "black", fill="#c9ac40", alpha=0.7,
+             size= 2,show.legend=F)+
+  geom_abline(linetype = "dotted", size=2)+
+  geom_abline(slope =  APSIM_B_sma %>% coef %>% .[[2]],
+              intercept = APSIM_B_sma %>% coef %>% .[[1]],
+              linetype="solid", col="#5d468f", size=2)+
+  stat_ellipse(type="norm", level=0.95)+
+  scale_x_continuous(limits = c(0,32), breaks = seq(0,30, by=5))+
+  scale_y_continuous(limits = c(0,32), breaks = seq(0,30, by=5))+
+  labs(title = "Barley Grain No.", x = "Observed", y = "Predicted")+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        title = element_text(family = "serif", color="black",
+                             size = rel(1)),
+        axis.text.y = element_text(family = "serif", color="black",
+                                   size = rel(1.5)),
+        axis.text.x = element_text(family = "serif", color="black",
+                                   size = rel(1.5)),
+        strip.text = element_blank(),
+        strip.background = element_blank(),
+        aspect.ratio = 1)
+
+plot.5B = ggMarginal(FIG5_B,type = "densigram",
+      xparams = list(col="black",fill="grey",bins = 20, alpha=0.4, size = 0.5),
+      yparams = list(col="black",fill="grey", bins = 20,alpha=0.4, size=0.5))
+
+plot.5B
+
+```
+\newpage
+
+##  C. Sorghum Grain No. <br>
+
+```{r warning=FALSE, message=FALSE}
+
+# Data
+APSIM_C = APSIM_datasets %>% filter(Dataset == "C") %>%  unnest(cols = c("data"))
+
+# SMA regression (smatr, see Warton et al. 2012)
+APSIM_C_sma = APSIM_datasets %>% filter(Dataset == "C") %>%
+  unnest() %>% sma(P_i~O_i,data=.)
+
+FIG5_C = APSIM_C %>%
+  ggplot(aes(x = O_i, y=P_i))+
+  geom_point(shape = 21, color = "black", fill="#c9ac40", alpha=0.7,
+             size= 2,show.legend=F)+
+  geom_abline(linetype = "dotted", size=2)+
+  geom_abline(slope =  APSIM_C_sma %>% coef %>% .[[2]],
+              intercept = APSIM_C_sma %>% coef %>% .[[1]],
+              linetype="solid", col="#5d468f", size=2)+
+  stat_ellipse(type="norm", level=0.95)+
+  scale_x_continuous(limits = c(0,48), breaks = seq(0,45, by=5))+
+  scale_y_continuous(limits = c(0,48), breaks = seq(0,45, by=5))+
+  labs(title = "Sorghum Grain No.", x = "Observed", y = "Predicted")+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        title = element_text(family = "serif", color="black",
+                             size = rel(1)),
+        axis.text.y = element_text(family = "serif", color="black",
+                                   size = rel(1.5)),
+        axis.text.x = element_text(family = "serif", color="black",
+                                   size = rel(1.5)),
+        strip.text = element_blank(),
+        strip.background = element_blank(),
+        aspect.ratio = 1)
+
+plot.5C = ggMarginal(FIG5_C,type = "densigram",
+      xparams = list(col="black",fill="grey",bins = 20, alpha=0.4, size = 0.5),
+      yparams = list(col="black",fill="grey", bins = 20,alpha=0.4, size=0.5))
+
+plot.5C
+
+```
+\newpage
+
+##  D. Chickpea Dry-mass. <br>
+
+```{r warning=FALSE, message=FALSE}
+
+# Data
+APSIM_D = APSIM_datasets %>% filter(Dataset == "D") %>%  unnest(cols = c("data"))
+
+# SMA regression (smatr, see Warton et al. 2012)
+APSIM_D_sma = APSIM_datasets %>% filter(Dataset == "D") %>%
+  unnest() %>% sma(P_i~O_i,data=.)
+
+FIG5_D = APSIM_D %>%
+  ggplot(aes(x = O_i, y=P_i))+
+  geom_point(shape = 21, color = "black", fill="#c9ac40",
+             alpha=0.7, size= 2,show.legend=F)+
+  geom_abline(linetype = "dotted", size=2)+
+  geom_abline(slope =  APSIM_D_sma %>% coef %>% .[[2]],
+              intercept = APSIM_D_sma %>% coef %>% .[[1]],
+              linetype="solid", col="#5d468f", size=2)+
+  stat_ellipse(type="norm", level=0.95)+
+  scale_x_continuous(limits = c(0,1900), breaks = seq(0,1800, by=300))+
+  scale_y_continuous(limits = c(0,1900), breaks = seq(0,1800, by=300))+
+  labs(title = "Chickpea Dry Mass (kg/ha)", x = "Observed", y = "Predicted")+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        title = element_text(family = "serif", color="black",
+                             size = rel(1)),
+        axis.text.y = element_text(family = "serif", color="black",
+                                   size = rel(1.5)),
+        axis.text.x = element_text(family = "serif", color="black",
+                                   size = rel(1.5)),
+        strip.text = element_blank(),
+        strip.background = element_blank(),
+        aspect.ratio = 1)
+
+plot.5D = ggMarginal(FIG5_D,type = "densigram",
+      xparams = list(col="black",fill="grey",bins = 20, alpha=0.4, size = 0.5),
+      yparams = list(col="black",fill="grey", bins = 20,alpha=0.4, size=0.5))
+
+plot.5D
+
+
+```
+
+\newpage
+
+## REFERENCES <br/>
+
+- Correndo, A.A., Hefley, T., Holzworth, D., Ciampitti, I.A., *Under-review*. Revisiting linear regression to test agreement in continuous predicted-observed datasets. *Agr. Syst.* x, xx-xx.
+
+- Duveiller, G., Fasbender, D., Meroni, M., 2016. Revisiting the concept of a symmetric index of agreement for continuous datasets. *Sci. Rep.* 6, 1–14. https://doi.org/10.1038/srep19401
+
+- Gupta, H. V., Kling, H., Yilmaz, K.K., Martinez, G.F., 2009. Decomposition of the mean squared error and NSE performance criteria: Implications for improving hydrological modelling. *J. Hydrol.* 377, 80–91. https://doi.org/10.1016/j.jhydrol.2009.08.003
+
+- Holzworth, D., Huth, N.I., Fainges, J., Brown, H., Zurcher, E., Cichota, R., Verrall, S., Herrmann, N.I., Zheng, B., Snow, V., 2018. APSIM Next Generation: Overcoming challenges in modernising a farming systems model. *Environ. Model. Softw.* 103, 43–51. https://doi.org/10.1016/j.envsoft.2018.02.002
+
+- Ji, L., Gallo, K., 2006. An agreement coefficient for image comparison. Photogramm. *Eng. Remote Sensing.* 7, July 2006, 823-833. https://doi.org/10.14358/PERS.72.7.823
+
+- Kobayashi, K., Salam, M.U., 2000. Comparing simulated and measured values using mean squared deviation and its components. *Agron. J.* 92, 345–352. https://doi.org/10.2134/agronj2000.922345x
+
+- Lin, L.I.-K., 1989. A concordance correlation coefficient to evaluate reproducibility. Biometrics. 45(1), 255-268. https://doi.org/10.2307/2532051
+
+- Smith, E.P., Rose, K.A., 1995. Model goodness-of-fit analysis using regression and related techniques. *Ecol. Modell.* 77, 49–64. https://doi.org/10.1016/0304-3800(93)E0074-D
+
+- Wallach, D., Makowski, D., Jones, J.W., Brun, F., 2019. Chapter 9: Model evaluation. In: D. Wallach, D. Makowski, J.W. Jones, F. Brun, eds. Working with dynamic crop models, 3rd edn. San Diego, CA, USA: Academic Press, 311- 373.
+
+- Warton, D.I., Wright, I.J., Falster, D.S., Westoby, M., 2006. Bivariate line-fitting methods for allometry. *Biol. Rev. Camb. Philos. Soc.* 81, 259–291. https://doi.org/10.1017/S1464793106007007
+
+- Warton, D.I., Duursma, R.A., Falster, D.S., Taskinen, S., 2012. smatr 3– an R package for estimation and inference about allometric lines. *Methods in Ecology and Evolution* 3: 257-259. https://doi.org/10.1111/j.2041-210X.2011.00153.x
+
+- Willmott, C.J., 1981. On the validation of models. *Phys. Geogr.* 2, 184–194. https://doi.org/10.1080/02723646.1981.10642213
+
